@@ -161,19 +161,33 @@ class DoctorCommand extends Command
         if ($binary === '') {
             return false;
         }
-
-        if (str_contains($binary, DIRECTORY_SEPARATOR)) {
-            return is_file($binary) && is_executable($binary);
+    
+        // If an explicit file path was provided, check it directly.
+        if (is_file($binary)) {
+            // is_executable() is unreliable/unnecessary for Windows .exe files.
+            return PHP_OS_FAMILY === 'Windows' || is_executable($binary);
         }
-
+    
+        // Otherwise try resolving the executable from PATH.
         return $this->findBinaryOnPath($binary) !== null;
     }
 
     protected function findBinaryOnPath(string $binary): ?string
     {
-        $result = @shell_exec('command -v '.escapeshellarg($binary).' 2>/dev/null');
-        $path = is_string($result) ? trim($result) : '';
-
-        return $path !== '' ? $path : null;
+        if (PHP_OS_FAMILY === 'Windows') {
+            $result = @shell_exec('where '.escapeshellarg($binary).' 2>NUL');
+        } else {
+            $result = @shell_exec('command -v '.escapeshellarg($binary).' 2>/dev/null');
+        }
+    
+        if (! is_string($result)) {
+            return null;
+        }
+    
+        $paths = preg_split('/\R/', trim($result));
+    
+        return ! empty($paths[0])
+            ? trim($paths[0])
+            : null;
     }
 }
