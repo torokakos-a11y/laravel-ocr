@@ -39,7 +39,7 @@
     "thiagoalessio/tesseract_ocr": "^2.12",
     "smalot/pdfparser": "^2.0",
     "intervention/image": "^3.0",
-    "guzzlehttp/guzzle": "^7.0",
+    "guzzlehttp/guzzle": "^7.0 || ^8.0",
     "aws/aws-sdk-php": "^3.369",
     "ext-json": "*"
   },
