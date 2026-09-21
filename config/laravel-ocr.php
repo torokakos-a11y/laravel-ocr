@@ -29,6 +29,9 @@ return [
             'binary' => env('TESSERACT_BINARY', '/usr/bin/tesseract'),
             'language' => env('TESSERACT_LANGUAGE', 'eng'),
             'timeout' => env('TESSERACT_TIMEOUT', 60),
+            // Ignore raster decorations narrower or shorter than this many pixels.
+            // Set to 1 to let every embedded image trigger PDF OCR.
+            'pdf_min_image_dimension' => env('TESSERACT_PDF_MIN_IMAGE_DIMENSION', 8),
         ],
 
         'google_vision' => [

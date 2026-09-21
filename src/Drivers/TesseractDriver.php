@@ -22,13 +22,9 @@ class TesseractDriver implements OCRDriver
         try {
             $imagePath = $this->prepareDocument($document);
 
-            // If PDF text was extracted directly via pdfparser, return it without Tesseract
             if ($this->pdfExtractedText !== null) {
-                $text = $this->pdfExtractedText;
-                $this->pdfExtractedText = null;
-
                 return [
-                    'text' => $text,
+                    'text' => $this->pdfExtractedText,
                     'confidence' => 0.90,
                     'bounds' => [],
                     'metadata' => [
@@ -61,16 +57,10 @@ class TesseractDriver implements OCRDriver
                 $ocr->psm($options['psm']);
             }
 
-            try {
-                $text = $ocr->run();
-            } catch (\Exception $e) {
-                // Tesseract ran but produced no output (e.g. image has no readable text)
-                if (str_contains($e->getMessage(), 'did not produce any output')) {
-                    $text = '';
-                } else {
-                    throw $e;
-                }
-            }
+            // The wrapper also uses "did not produce any output" for process
+            // failures, missing language data, and unreadable images. Preserve
+            // its diagnostics instead of reporting those failures as empty text.
+            $text = $ocr->run();
 
             $bounds = $this->extractBounds($ocr);
 
@@ -86,11 +76,12 @@ class TesseractDriver implements OCRDriver
             ];
         } catch (\Exception $e) {
             \Log::error($e->getMessage());
-            throw new OCRException('Tesseract extraction failed: '.$e->getMessage());
+            throw new OCRException('Tesseract extraction failed: '.$e->getMessage(), 0, $e);
         } finally {
             if (isset($imagePath) && file_exists($imagePath) && $imagePath !== $document) {
                 unlink($imagePath);
             }
+            $this->pdfExtractedText = null;
         }
     }
 
@@ -151,17 +142,34 @@ class TesseractDriver implements OCRDriver
 
     protected function prepareDocument($document): string
     {
-        if (filter_var($document, FILTER_VALIDATE_URL)) {
-            $tempPath = sys_get_temp_dir().'/'.uniqid('ocr_').'.jpg';
-            copy($document, $tempPath);
+        $this->pdfExtractedText = null;
 
-            return $tempPath;
+        if (filter_var($document, FILTER_VALIDATE_URL)) {
+            $tempPath = tempnam(sys_get_temp_dir(), 'ocr_');
+            if ($tempPath === false) {
+                throw new OCRException('Unable to create a temporary download file.');
+            }
+
+            try {
+                if (! copy($document, $tempPath)) {
+                    throw new OCRException('Unable to download document.');
+                }
+
+                // Detect the downloaded content, including PDF URLs without an extension.
+                $preparedPath = $this->prepareDocument($tempPath);
+
+                return $preparedPath;
+            } finally {
+                if ((! isset($preparedPath) || $preparedPath !== $tempPath) && file_exists($tempPath)) {
+                    unlink($tempPath);
+                }
+            }
         }
 
         $extension = strtolower(pathinfo($document, PATHINFO_EXTENSION));
 
         // If no extension (e.g. PHP temp upload like /tmp/phpXXXXX), detect from MIME type
-        if (empty($extension)) {
+        if (empty($extension) || $extension === 'tmp') {
             $mimeType = mime_content_type($document);
             $mimeToExt = [
                 'image/jpeg' => 'jpg',
@@ -175,16 +183,14 @@ class TesseractDriver implements OCRDriver
         }
 
         if ($extension === 'pdf') {
-            // First try to extract text directly using pdfparser (no Ghostscript needed)
-            $pdfText = $this->extractPdfText($document);
-            if (! empty(trim($pdfText))) {
-                // PDF has extractable text — return it directly via the extract method
-                $this->pdfExtractedText = $pdfText;
+            $text = $this->extractTextOnlyPdf($document);
+            if ($text !== null) {
+                $this->pdfExtractedText = $text;
 
-                return $document; // Will be intercepted in extract()
+                return $document;
             }
 
-            // Scanned PDF — convert to image using ImageMagick
+            // Mixed or scanned PDFs need OCR even when some text is selectable.
             return $this->convertPdfToImage($document);
         }
 
@@ -195,38 +201,81 @@ class TesseractDriver implements OCRDriver
         throw new OCRException("Unsupported file format: {$extension}");
     }
 
-    /**
-     * Extract text from PDF using smalot/pdfparser.
-     */
-    protected function extractPdfText(string $pdfPath): string
+    protected function extractTextOnlyPdf(string $pdfPath): ?string
     {
         try {
-            $parser = new \Smalot\PdfParser\Parser;
-            $pdf = $parser->parseFile($pdfPath);
+            $pdf = (new \Smalot\PdfParser\Parser)->parseFile($pdfPath);
+            $minimumDimension = max(1, (int) ($this->config['pdf_min_image_dimension'] ?? 8));
+            foreach ($pdf->getObjectsByType('XObject', 'Image') as $image) {
+                $details = $image->getDetails(false);
+                $width = (int) ($details['Width'] ?? 0);
+                $height = (int) ($details['Height'] ?? 0);
 
-            return $pdf->getText();
+                // Very thin raster rules and tiny decorative images should not
+                // force a text document through OCR. Unknown dimensions remain
+                // conservative; set the threshold to 1 to include every image.
+                if ($width <= 0 || $height <= 0 || min($width, $height) >= $minimumDimension) {
+                    return null;
+                }
+            }
+
+            // Inline images have no separate Image XObject. Inspect decoded
+            // streams too, including nested Form XObjects.
+            foreach ($pdf->getObjects() as $object) {
+                if (preg_match('/(?:^|\s)BI\s+\//', $object->getContent() ?? '')) {
+                    return null;
+                }
+            }
+
+            $text = $pdf->getText();
+
+            return trim($text) !== '' ? $text : null;
         } catch (\Exception $e) {
-            return '';
+            // If parsing fails, rendering can still recover the visible text.
+            return null;
         }
     }
 
     protected function convertPdfToImage($pdfPath): string
     {
-        $imagePath = sys_get_temp_dir().'/'.uniqid('ocr_').'.jpg';
+        if (! extension_loaded('imagick')) {
+            throw new OCRException('PDF OCR requires the Imagick extension and Ghostscript.');
+        }
+
+        $imagePath = sys_get_temp_dir().'/'.uniqid('ocr_', true).'.tiff';
 
         // Ensure Ghostscript can be found (Herd/Valet have limited $PATH)
         $currentPath = getenv('PATH') ?: '';
-        if (! str_contains($currentPath, '/opt/homebrew/bin')) {
-            putenv("PATH=/opt/homebrew/bin:/usr/local/bin:{$currentPath}");
+        if (PHP_OS_FAMILY === 'Darwin' && ! str_contains($currentPath, '/opt/homebrew/bin')) {
+            putenv('PATH=/opt/homebrew/bin'.PATH_SEPARATOR.'/usr/local/bin'.PATH_SEPARATOR.$currentPath);
         }
 
         $imagick = new \Imagick;
-        $imagick->setResolution(300, 300);
-        $imagick->readImage($pdfPath.'[0]');
-        $imagick->setImageFormat('jpg');
-        $imagick->writeImage($imagePath);
-        $imagick->clear();
-        $imagick->destroy();
+        try {
+            $imagick->setResolution(300, 300);
+            $imagick->readImage($pdfPath);
+            foreach ($imagick as $page) {
+                $page->setImageBackgroundColor('white');
+                $page->setImageAlphaChannel(\Imagick::ALPHACHANNEL_REMOVE);
+                $page->setImageFormat('tiff');
+                $page->setImageCompression(\Imagick::COMPRESSION_LZW);
+            }
+            // Tesseract reads every frame of a multi-page TIFF in page order.
+            if (! $imagick->writeImages($imagePath, true)) {
+                throw new OCRException('Unable to write rendered PDF pages.');
+            }
+        } catch (\Throwable $e) {
+            if (file_exists($imagePath)) {
+                unlink($imagePath);
+            }
+            throw $e;
+        } finally {
+            $imagick->clear();
+            $imagick->destroy();
+            if (PHP_OS_FAMILY === 'Darwin') {
+                putenv('PATH='.$currentPath);
+            }
+        }
 
         return $imagePath;
     }

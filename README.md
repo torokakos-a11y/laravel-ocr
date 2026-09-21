@@ -215,6 +215,8 @@ LARAVEL_OCR_DRIVER=tesseract
 
 All processing happens on your server. No data leaves your infrastructure.
 
+PDFs with extractable text and no significant images use direct extraction without Ghostscript or Tesseract. Embedded image objects narrower or shorter than 8 pixels are ignored as likely decorations, such as horizontal rules. This is a heuristic: set `TESSERACT_PDF_MIN_IMAGE_DIMENSION=1` to include every embedded image, including very small text images. Inline images and images with unknown dimensions still trigger OCR. PDFs containing other images (including logos or photos), PDFs without extractable text, and PDFs that cannot be parsed are rendered at 300 DPI and OCR is applied to every page. This path requires the PHP Imagick extension and Ghostscript and uses more time and memory than direct extraction. On Windows, keep Ghostscript available to ImageMagick through your installation or system PATH. For Hungarian documents, install Tesseract's `hun` language data and set `TESSERACT_LANGUAGE=hun`.
+
 ```env
 LARAVEL_OCR_DRIVER=tesseract
 TESSERACT_BINARY=/usr/bin/tesseract
