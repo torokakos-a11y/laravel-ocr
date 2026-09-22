@@ -36,7 +36,7 @@ class TesseractDriver implements OCRDriver
                 ];
             }
 
-            $ocr = new TesseractOCR($imagePath);
+            $ocr = $this->createTesseract($imagePath);
 
             // Set the tesseract binary path from config (Herd/Valet have limited $PATH)
             if (! empty($this->config['binary'])) {
@@ -145,7 +145,7 @@ class TesseractDriver implements OCRDriver
         $this->pdfExtractedText = null;
 
         if (filter_var($document, FILTER_VALIDATE_URL)) {
-            $tempPath = tempnam(sys_get_temp_dir(), 'ocr_');
+            $tempPath = tempnam($this->temporaryDirectory(), 'ocr_');
             if ($tempPath === false) {
                 throw new OCRException('Unable to create a temporary download file.');
             }
@@ -195,10 +195,52 @@ class TesseractDriver implements OCRDriver
         }
 
         if (in_array($extension, ['jpg', 'jpeg', 'png', 'tiff', 'bmp'])) {
+            // Uploaded images can live in PHP-FPM's private /tmp. Stage them
+            // in the configured shared directory before invoking Docker.
+            if (! empty($this->config['temp_dir'])) {
+                $tempPath = tempnam($this->temporaryDirectory(), 'ocr_');
+                if ($tempPath === false) {
+                    throw new OCRException('Unable to create a temporary image file.');
+                }
+                try {
+                    if (! copy($document, $tempPath)) {
+                        throw new OCRException('Unable to copy image to the OCR temporary directory.');
+                    }
+                } catch (\Throwable $e) {
+                    unlink($tempPath);
+                    throw $e;
+                }
+
+                return $tempPath;
+            }
+
             return $document;
         }
 
         throw new OCRException("Unsupported file format: {$extension}");
+    }
+
+    protected function temporaryDirectory(): string
+    {
+        $directory = $this->config['temp_dir'] ?? null;
+        if (! $directory) {
+            return sys_get_temp_dir();
+        }
+
+        $resolved = realpath($directory);
+        if ($resolved === false || ! is_dir($resolved) || ! is_writable($resolved)) {
+            throw new OCRException('OCR temporary directory must exist and be writable: '.$directory);
+        }
+
+        return $resolved;
+    }
+
+    protected function createTesseract(string $imagePath): TesseractOCR
+    {
+        $ocr = new TesseractOCR($imagePath);
+        $ocr->tempDir($this->temporaryDirectory());
+
+        return $ocr;
     }
 
     protected function extractTextOnlyPdf(string $pdfPath): ?string
@@ -242,7 +284,7 @@ class TesseractDriver implements OCRDriver
             throw new OCRException('PDF OCR requires the Imagick extension and Ghostscript.');
         }
 
-        $imagePath = sys_get_temp_dir().'/'.uniqid('ocr_', true).'.tiff';
+        $imagePath = $this->temporaryDirectory().'/'.uniqid('ocr_', true).'.tiff';
 
         // Ensure Ghostscript can be found (Herd/Valet have limited $PATH)
         $currentPath = getenv('PATH') ?: '';

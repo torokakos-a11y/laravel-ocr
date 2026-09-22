@@ -224,6 +224,18 @@ TESSERACT_LANGUAGE=eng
 TESSERACT_TIMEOUT=60
 ```
 
+For a Docker-backed Tesseract executable, set `LARAVEL_OCR_TEMP_DIR` to an existing, writable directory shared by web PHP and the Docker host. The driver uses it for downloads, rendered PDF images, staged image inputs, and Tesseract output. Mount that directory read-write into the container at the same absolute path. This avoids PHP-FPM private `/tmp` visibility problems. Without this setting, the system temporary directory remains the default.
+
+```env
+LARAVEL_OCR_TEMP_DIR=/var/www/smapp-system/data/ocr-tmp
+```
+
+If the application has already published `config/laravel-ocr.php`, add `'temp_dir' => env('LARAVEL_OCR_TEMP_DIR'),` under `drivers.tesseract` there too. Refresh Laravel's configuration cache and restart long-running queue workers after deployment. The wrapper should forward all arguments with `"$@"` and include this Docker mount:
+
+```sh
+--mount type=bind,src=/var/www/smapp-system/data/ocr-tmp,dst=/var/www/smapp-system/data/ocr-tmp
+```
+
 ### Google Cloud Vision
 
 ```env
